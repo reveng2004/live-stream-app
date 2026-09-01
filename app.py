@@ -3,16 +3,16 @@ from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'stream_secure_key'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+app.config['SECRET_KEY'] = 'stream_secure_audio_key'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=10000000)
 
-# 1. لاپەرێ سەرەکی (بینەر + تۆمارکرن ب فۆرماتێ MP4)
+# 1. لاپەرێ بینەرێ سەرەکی (تۆمارکرن و خەزنکرنا ئۆتۆماتیک + دەنگ)
 VIEWER_HTML = """
 <!DOCTYPE html>
 <html lang="ku" dir="rtl">
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Stream & MP4 Recorder</title>
+    <title>Auto Live Stream & Recorder (Audio/Video)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
         body { 
@@ -47,37 +47,32 @@ VIEWER_HTML = """
             height: 100%; 
             object-fit: contain; 
         }
-        .controls {
+        .status-badge {
             margin-top: 20px;
-            display: flex;
-            gap: 15px;
-            align-items: center;
-        }
-        .rec-btn {
-            background: #da3633;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            font-size: 16px;
-            font-weight: bold;
-            border-radius: 8px;
-            cursor: pointer;
+            padding: 10px 20px;
+            border-radius: 30px;
+            font-size: 15px;
+            font-weight: 600;
             display: flex;
             align-items: center;
-            gap: 8px;
-            transition: 0.2s;
+            gap: 10px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            color: #8b949e;
         }
-        .rec-btn.recording {
-            background: #238636;
+        .status-badge.active {
+            background: rgba(218, 54, 51, 0.15);
+            border-color: #da3633;
+            color: #f85149;
         }
         .dot {
             width: 12px;
             height: 12px;
-            background: white;
+            background: #8b949e;
             border-radius: 50%;
-            display: inline-block;
         }
-        .recording .dot {
+        .status-badge.active .dot {
+            background: #da3633;
             animation: pulse 1s infinite;
         }
         @keyframes pulse {
@@ -87,8 +82,8 @@ VIEWER_HTML = """
         }
         #recTimer {
             font-family: monospace;
-            font-size: 18px;
-            color: #8b949e;
+            font-size: 16px;
+            color: #c9d1d9;
         }
     </style>
 </head>
@@ -97,12 +92,10 @@ VIEWER_HTML = """
         <canvas id="canvasView" width="400" height="700"></canvas>
     </div>
 
-    <div class="controls">
-        <button id="recBtn" class="rec-btn" onclick="toggleRecording()">
-            <span class="dot"></span>
-            <span id="btnText">دەستپێکرنا تۆمارکرنێ</span>
-        </button>
-        <span id="recTimer">00:00</span>
+    <div id="statusBadge" class="status-badge">
+        <span class="dot"></span>
+        <span id="statusText">ل هیڤیا پەخشێ مۆبایلێ...</span>
+        <span id="recTimer" style="display: none;">00:00</span>
     </div>
 
     <script>
@@ -116,7 +109,22 @@ VIEWER_HTML = """
         let isRecording = false;
         let timerInterval;
         let seconds = 0;
+        let idleTimeout;
         let selectedMimeType = 'video/mp4';
+
+        // سیستەمێ وەرگرتن و تێکەلکرنا دەنگی
+        let audioCtx;
+        let destNode;
+
+        function initAudioContext() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                destNode = audioCtx.createMediaStreamDestination();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
 
         img.onload = () => {
             canvas.width = img.width || 400;
@@ -124,35 +132,74 @@ VIEWER_HTML = """
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         };
 
+        // وەرگرتنا وێنەی و دەستپێکرنا ئۆتۆماتیک
         socket.on('new_frame', function(data) {
             img.src = data;
+            
+            // ئەگەر تۆمارکرن دەستپێنەکربیت، ئێکسەر دەستپێبکە
+            if (!isRecording) {
+                initAudioContext();
+                startRecording();
+            }
+
+            // دووبارە دەستپێکرنا مۆلەتا پچڕانێ (ئەگەر ٣ چرکە فریم نەهات دێ راوەستیت)
+            clearTimeout(idleTimeout);
+            idleTimeout = setTimeout(() => {
+                if (isRecording) {
+                    stopRecording("پەیوەندی نەما - ڤیدیۆ هاتە پاراستن");
+                }
+            }, 3500);
         });
 
-        function toggleRecording() {
-            if (!isRecording) {
-                startRecording();
-            } else {
-                stopRecording();
+        // وەرگرتنا دەنگێ مۆبایلێ
+        socket.on('stream_audio', function(pcmData) {
+            if (!audioCtx) initAudioContext();
+            try {
+                const floatArray = new Float32Array(pcmData);
+                const buffer = audioCtx.createBuffer(1, floatArray.length, audioCtx.sampleRate);
+                buffer.getChannelData(0).set(floatArray);
+                
+                const source = audioCtx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioCtx.destination);
+                source.connect(destNode);
+                source.start();
+            } catch (e) {
+                console.error("Audio error:", e);
             }
-        }
+        });
+
+        socket.on('stream_stop', function() {
+            if (isRecording) {
+                stopRecording("پەخش هاتە راگرتن - ڤیدیۆ هاتە پاراستن");
+            }
+        });
 
         function startRecording() {
             recordedChunks = [];
-            const stream = canvas.captureStream(20); // 20 FPS
+            
+            // تێکەلکرنا دەنگ و وێنەی پێکڤە د ناڤ یەک سترێم دا
+            const videoTrack = canvas.captureStream(20).getVideoTracks()[0];
+            const tracks = [videoTrack];
+            
+            if (destNode && destNode.stream.getAudioTracks().length > 0) {
+                tracks.push(destNode.stream.getAudioTracks()[0]);
+            }
+            
+            const combinedStream = new MediaStream(tracks);
 
-            // پشکنین و هەلبژارتنا فۆرماتێ MP4
-            if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
-                selectedMimeType = 'video/mp4;codecs=avc1';
+            if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1,mp4a.40.2')) {
+                selectedMimeType = 'video/mp4;codecs=avc1,mp4a.40.2';
             } else if (MediaRecorder.isTypeSupported('video/mp4')) {
                 selectedMimeType = 'video/mp4';
             } else {
-                selectedMimeType = 'video/webm;codecs=vp9';
+                selectedMimeType = 'video/webm;codecs=vp9,opus';
             }
 
             try {
-                mediaRecorder = new MediaRecorder(stream, { mimeType: selectedMimeType });
+                mediaRecorder = new MediaRecorder(combinedStream, { mimeType: selectedMimeType });
             } catch (e) {
-                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder = new MediaRecorder(combinedStream);
             }
 
             mediaRecorder.ondataavailable = (e) => {
@@ -162,12 +209,13 @@ VIEWER_HTML = """
             };
 
             mediaRecorder.onstop = saveVideo;
-            mediaRecorder.start(1000); // کۆمکرنا داتایێ هەر چرکە
+            mediaRecorder.start(1000);
 
             isRecording = true;
-            document.getElementById('recBtn').classList.add('recording');
-            document.getElementById('btnText').innerText = 'ڕاگرتن و دابەزاندن (MP4)';
-            
+            document.getElementById('statusBadge').classList.add('active');
+            document.getElementById('statusText').innerText = '🔴 یێ ب ئۆتۆماتیک تۆمار دکەت (دەنگ + رەنگ)';
+            document.getElementById('recTimer').style.display = 'inline';
+
             seconds = 0;
             timerInterval = setInterval(() => {
                 seconds++;
@@ -177,23 +225,30 @@ VIEWER_HTML = """
             }, 1000);
         }
 
-        function stopRecording() {
-            mediaRecorder.stop();
+        function stopRecording(reasonText) {
+            if (!isRecording) return;
             isRecording = false;
+            clearTimeout(idleTimeout);
             clearInterval(timerInterval);
-            document.getElementById('recBtn').classList.remove('recording');
-            document.getElementById('btnText').innerText = 'دەستپێکرنا تۆمارکرنێ';
-            document.getElementById('recTimer').innerText = '00:00';
+
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+
+            document.getElementById('statusBadge').classList.remove('active');
+            document.getElementById('statusText').innerText = reasonText || 'پەخش راوەستیا و هاتە خەزنکرن';
+            document.getElementById('recTimer').style.display = 'none';
         }
 
         function saveVideo() {
+            if (recordedChunks.length === 0) return;
             const ext = selectedMimeType.includes('mp4') ? 'mp4' : 'webm';
             const blob = new Blob(recordedChunks, { type: selectedMimeType });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.style.display = 'none';
             a.href = url;
-            a.download = `stream_record_${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.${ext}`;
+            a.download = `Document_Record_${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.${ext}`;
             document.body.appendChild(a);
             a.click();
             setTimeout(() => {
@@ -201,12 +256,15 @@ VIEWER_HTML = """
                 window.URL.revokeObjectURL(url);
             }, 100);
         }
+
+        // دەستنیشانکرن بۆ دەستپێکرنا دەنگی بێ کێشە
+        window.addEventListener('click', initAudioContext);
     </script>
 </body>
 </html>
 """
 
-# 2. لاپەرێ مۆبایلێ (پەخشکەر)
+# 2. لاپەرێ مۆبایلێ (پەخشێ وێنە + دەنگێ مایکرۆفۆنێ)
 PHONE_HTML = """
 <!DOCTYPE html>
 <html lang="ku" dir="rtl">
@@ -240,6 +298,8 @@ PHONE_HTML = """
 
     <script>
         const socket = io();
+        let audioContext;
+        let audioProcessor;
 
         async function initStream() {
             const status = document.getElementById('status');
@@ -247,22 +307,39 @@ PHONE_HTML = """
 
             try {
                 let stream;
-                if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+                // وەرگرتنا دەنگ و وێنەی
+                if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function") {
                     stream = await navigator.mediaDevices.getDisplayMedia({
                         video: { frameRate: { ideal: 15, max: 20 } },
-                        audio: false
+                        audio: true
                     });
-                } else if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                } else if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
                     stream = await navigator.mediaDevices.getUserMedia({
                         video: { facingMode: "user" },
-                        audio: false
+                        audio: true
                     });
                 } else {
-                    throw new Error("ئەڤ وێبگەڕە پشتگیرییا ڤیدیۆیێ ناکەت!");
+                    throw new Error("ئەڤ وێبگەڕە پشتگیری ناکەت!");
                 }
 
                 video.srcObject = stream;
                 await video.play();
+
+                // پەخشێ دەنگی ب رێکا AudioContext
+                const audioTracks = stream.getAudioTracks();
+                if (audioTracks.length > 0) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const audioSource = audioContext.createMediaStreamSource(new MediaStream([audioTracks[0]]));
+                    audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                    audioSource.connect(audioProcessor);
+                    audioProcessor.connect(audioContext.destination);
+
+                    audioProcessor.onaudioprocess = (e) => {
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        socket.emit('stream_audio', Array.from(inputData));
+                    };
+                }
 
                 status.innerText = "تو یێ ل بن پەخشی دا";
 
@@ -270,7 +347,8 @@ PHONE_HTML = """
                 const ctx = canvas.getContext('2d');
                 let isSending = false;
 
-                setInterval(() => {
+                // فرێکرنا وێنەی
+                const frameInterval = setInterval(() => {
                     if (video.videoWidth > 0 && !isSending) {
                         isSending = true;
                         canvas.width = 400;
@@ -283,11 +361,21 @@ PHONE_HTML = """
                     }
                 }, 65);
 
+                // دەما مۆبایل پەخشی بگریت
+                stream.getVideoTracks()[0].onended = () => {
+                    clearInterval(frameInterval);
+                    socket.emit('stream_stop');
+                };
+
             } catch (err) {
                 status.innerText = "خەلەتی: " + err.message;
                 status.style.color = "#da3633";
             }
         }
+
+        window.addEventListener('beforeunload', () => {
+            socket.emit('stream_stop');
+        });
 
         window.addEventListener('DOMContentLoaded', initStream);
     </script>
@@ -304,8 +392,16 @@ def stream_source():
     return render_template_string(PHONE_HTML)
 
 @socketio.on('stream_frame')
-def handle_stream(data):
+def handle_frame(data):
     emit('new_frame', data, broadcast=True, include_self=False)
+
+@socketio.on('stream_audio')
+def handle_audio(data):
+    emit('stream_audio', data, broadcast=True, include_self=False)
+
+@socketio.on('stream_stop')
+def handle_stop():
+    emit('stream_stop', broadcast=True, include_self=False)
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
