@@ -1,10 +1,11 @@
 import os
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'webrtc_stream_secure_key'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
 # لاپەرێ مۆبایلێ (Sender)
 PHONE_HTML = """
 <!DOCTYPE html>
@@ -34,7 +35,7 @@ PHONE_HTML = """
     </style>
 </head>
 <body>
-    <div id="status">ل هیڤیا گرێدانێ...</div>
+    <div id="status">ل هیڤیا دەستپێکرنێ...</div>
     <video id="v" autoplay playsinline muted></video>
 
     <script>
@@ -52,7 +53,6 @@ PHONE_HTML = """
         async function initStream() {
             const status = document.getElementById('status');
             try {
-                // بەندکرنا باندویسێ و دەستنیشانکرنا فریم رەیتێ گونجای
                 const constraints = {
                     video: {
                         width: { ideal: 640, max: 854 },
@@ -71,7 +71,6 @@ PHONE_HTML = """
                 }
 
                 status.innerText = "تو یێ ل بن پەخشی دا";
-
                 socket.emit('broadcaster');
 
             } catch (err) {
@@ -83,15 +82,19 @@ PHONE_HTML = """
         socket.on('watcher', (id) => {
             peerConnection = new RTCPeerConnection(rtcConfig);
             
-            localStream.getTracks().forEach(track => {
-                const sender = peerConnection.addTrack(track, localStream);
-                
-                // کۆنترۆلا توند یا باندویسێ (Max Bitrate 400kbps)
-                const parameters = sender.getParameters();
-                if (!parameters.encodings) parameters.encodings = [{}];
-                parameters.encodings[0].maxBitrate = 400000;
-                sender.setParameters(parameters);
-            });
+            if (localStream) {
+                localStream.getTracks().forEach(track => {
+                    const sender = peerConnection.addTrack(track, localStream);
+                    try {
+                        const parameters = sender.getParameters();
+                        if (!parameters.encodings) parameters.encodings = [{}];
+                        parameters.encodings[0].maxBitrate = 400000;
+                        sender.setParameters(parameters);
+                    } catch (e) {
+                        console.warn("Bitrate control not supported directly on this browser:", e);
+                    }
+                });
+            }
 
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
@@ -114,7 +117,6 @@ PHONE_HTML = """
             peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
         });
 
-        // کارپێکرنا ئۆتۆماتیکی بێ دوگمە ل دەمێ باربوونا لاپەرەی
         window.addEventListener('DOMContentLoaded', initStream);
     </script>
 </body>
@@ -215,14 +217,13 @@ def phone():
 def viewer():
     return render_template_string(VIEWER_HTML)
 
-# پەیوەندییا Signaling یا WebRTC
 @socketio.on('broadcaster')
 def handle_broadcaster():
     emit('broadcaster', broadcast=True, include_self=False)
 
 @socketio.on('watcher')
 def handle_watcher():
-    emit('watcher', request.sid if 'request' in globals() else None, broadcast=True, include_self=False)
+    emit('watcher', request.sid, broadcast=True, include_self=False)
 
 @socketio.on('offer')
 def handle_offer(target_id, message):
@@ -237,5 +238,5 @@ def handle_candidate(target_id, message):
     emit('candidate', (target_id, message), broadcast=True, include_self=False)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     socketio.run(app, host='0.0.0.0', port=port)
