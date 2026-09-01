@@ -6,7 +6,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'webrtc_stream_secure_key'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# 1. لاپەرێ سەرەکی (بینەر + QR Code)
+# 1. لاپەرێ سەرەکی (بینەر بتنێ بێ QR و بێ لینک)
 VIEWER_HTML = """
 <!DOCTYPE html>
 <html lang="ku" dir="rtl">
@@ -21,52 +21,29 @@ VIEWER_HTML = """
             color: white; 
             margin: 0; 
             display: flex; 
-            flex-direction: row; 
             align-items: center; 
             justify-content: center; 
-            gap: 40px;
             min-height: 100vh; 
             padding: 20px;
             box-sizing: border-box;
         }
         .box { 
-            width: 380px; 
-            height: 700px; 
-            max-height: 85vh; 
+            width: 420px; 
+            height: 750px; 
+            max-height: 90vh; 
             border: 2px solid #30363d; 
-            border-radius: 16px; 
+            border-radius: 20px; 
             overflow: hidden; 
             background: #000; 
-            box-shadow: 0 0 30px rgba(46, 160, 67, 0.15); 
+            box-shadow: 0 0 35px rgba(46, 160, 67, 0.2); 
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
         video { 
             width: 100%; 
             height: 100%; 
             object-fit: contain; 
-        }
-        .qr-card {
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 16px;
-            padding: 24px;
-            text-align: center;
-            max-width: 300px;
-        }
-        .qr-card img {
-            width: 200px;
-            height: 200px;
-            border-radius: 8px;
-            margin-top: 15px;
-            background: white;
-            padding: 8px;
-        }
-        .link-text {
-            word-break: break-all;
-            direction: ltr;
-            color: #58a6ff;
-            font-size: 13px;
-            margin-top: 10px;
-            display: block;
         }
     </style>
 </head>
@@ -75,22 +52,9 @@ VIEWER_HTML = """
         <video id="remoteVideo" autoplay playsinline muted></video>
     </div>
 
-    <div class="qr-card">
-        <h3 style="margin-top: 0; color: #2ea043;">📱 پەخشێ ڕاستەوخۆ</h3>
-        <p style="font-size: 14px; color: #8b949e; margin: 0;">ئەڤی کۆدی ب مۆبایلێ سکان بکە یان بەستەرێ ڤەکە:</p>
-        <img id="qrImg" src="" alt="QR Code">
-        <a id="streamLink" class="link-text" href="" target="_blank"></a>
-    </div>
-
     <script>
         const socket = io();
         let peerConnection;
-
-        // دروستکرنا لینکی و QR Code ب شێوەیەکێ دینامیکی
-        const streamUrl = window.location.origin + '/stream';
-        document.getElementById('streamLink').href = streamUrl;
-        document.getElementById('streamLink').innerText = streamUrl;
-        document.getElementById('qrImg').src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(streamUrl)}`;
 
         const rtcConfig = {
             iceServers: [
@@ -132,7 +96,7 @@ VIEWER_HTML = """
 </html>
 """
 
-# 2. لاپەرێ مۆبایلێ (تەنێ تێکست + دەستپێکرنا ئۆتۆماتیکی)
+# 2. لاپەرێ مۆبایلێ (تەنێ تێکستێ "تو یێ ل بن پەخشی دا" و کارکرنا ئۆتۆماتیک)
 PHONE_HTML = """
 <!DOCTYPE html>
 <html lang="ku" dir="rtl">
@@ -249,7 +213,7 @@ PHONE_HTML = """
 </html>
 """
 
-# ڕێڕەوا سەرەکی بۆ لاپەرێ بینینێ و QR
+# ڕێڕەوا سەرەکی (بۆ بینینێ ل سەر لاپتۆپ/کۆمپیتەر)
 @app.route('/')
 def viewer():
     return render_template_string(VIEWER_HTML)
