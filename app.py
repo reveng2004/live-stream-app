@@ -6,13 +6,13 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'stream_secure_key'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# 1. لاپەرێ سەرەکی (بینەر + تۆمارکرن و دابەزاندن)
+# 1. لاپەرێ سەرەکی (بینەر + تۆمارکرن ب فۆرماتێ MP4)
 VIEWER_HTML = """
 <!DOCTYPE html>
 <html lang="ku" dir="rtl">
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Stream & Record</title>
+    <title>Live Stream & MP4 Recorder</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
         body { 
@@ -116,6 +116,7 @@ VIEWER_HTML = """
         let isRecording = false;
         let timerInterval;
         let seconds = 0;
+        let selectedMimeType = 'video/mp4';
 
         img.onload = () => {
             canvas.width = img.width || 400;
@@ -138,23 +139,34 @@ VIEWER_HTML = """
         function startRecording() {
             recordedChunks = [];
             const stream = canvas.captureStream(20); // 20 FPS
-            
-            mediaRecorder = new MediaRecorder(stream, {
-                mimeType: 'video/webm;codecs=vp9'
-            });
+
+            // پشکنین و هەلبژارتنا فۆرماتێ MP4
+            if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
+                selectedMimeType = 'video/mp4;codecs=avc1';
+            } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+                selectedMimeType = 'video/mp4';
+            } else {
+                selectedMimeType = 'video/webm;codecs=vp9';
+            }
+
+            try {
+                mediaRecorder = new MediaRecorder(stream, { mimeType: selectedMimeType });
+            } catch (e) {
+                mediaRecorder = new MediaRecorder(stream);
+            }
 
             mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) {
+                if (e.data && e.data.size > 0) {
                     recordedChunks.push(e.data);
                 }
             };
 
             mediaRecorder.onstop = saveVideo;
-            mediaRecorder.start();
+            mediaRecorder.start(1000); // کۆمکرنا داتایێ هەر چرکە
 
             isRecording = true;
             document.getElementById('recBtn').classList.add('recording');
-            document.getElementById('btnText').innerText = 'ڕاگرتن و دابەزاندن';
+            document.getElementById('btnText').innerText = 'ڕاگرتن و دابەزاندن (MP4)';
             
             seconds = 0;
             timerInterval = setInterval(() => {
@@ -175,12 +187,13 @@ VIEWER_HTML = """
         }
 
         function saveVideo() {
-            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            const ext = selectedMimeType.includes('mp4') ? 'mp4' : 'webm';
+            const blob = new Blob(recordedChunks, { type: selectedMimeType });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.style.display = 'none';
             a.href = url;
-            a.download = `stream_record_${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.webm`;
+            a.download = `stream_record_${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.${ext}`;
             document.body.appendChild(a);
             a.click();
             setTimeout(() => {
